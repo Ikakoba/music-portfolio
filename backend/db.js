@@ -2,10 +2,7 @@ const sqlite3 = require("sqlite3").verbose();
 const path = require("path");
 const bcrypt = require("bcrypt");
 
-// Путь к файлу базы данных (лежит рядом с db.js)
 const dbFile = path.join(__dirname, "database.sqlite");
-
-// Подключаемся к SQLite
 const db = new sqlite3.Database(dbFile);
 
 // Инициализация таблиц и создание админа
@@ -22,7 +19,7 @@ db.serialize(() => {
   `
   );
 
-  // Таблица треков
+  // Таблица треков (если создаётся с нуля — сразу с колонкой lyrics)
   db.run(
     `
     CREATE TABLE IF NOT EXISTS tracks (
@@ -30,10 +27,21 @@ db.serialize(() => {
       title TEXT,
       filename TEXT NOT NULL,
       cover_filename TEXT,
+      lyrics TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `
   );
+
+  // Если таблица уже существовала без lyrics — попробуем добавить колонку
+  db.run(`ALTER TABLE tracks ADD COLUMN lyrics TEXT`, (err) => {
+    if (err) {
+      // Если ошибка "duplicate column name" — значит колонка уже есть, это нормально
+      if (!String(err.message).includes("duplicate column name")) {
+        console.error("Ошибка добавления колонки lyrics:", err);
+      }
+    }
+  });
 
   // Проверяем, есть ли админ
   const adminLogin = "admin";
@@ -52,7 +60,10 @@ db.serialize(() => {
         // Админа нет — создаём
         bcrypt.hash(adminPass, saltRounds, (errHash, hash) => {
           if (errHash) {
-            console.error("Ошибка хеширования пароля администратора:", errHash);
+            console.error(
+              "Ошибка хеширования пароля администратора:",
+              errHash
+            );
             return;
           }
           db.run(
@@ -75,5 +86,4 @@ db.serialize(() => {
   );
 });
 
-// Экспортируем ИМЕННО сам объект db, у которого есть методы get, all, run
 module.exports = db;

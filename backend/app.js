@@ -5,7 +5,7 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const path = require("path");
 const fs = require("fs");
-const db = require("./db"); // наш db.js
+const db = require("./db");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -112,7 +112,7 @@ app.post("/api/login", (req, res) => {
 
 /**
  * GET /api/tracks
- * Список треков
+ * Список треков (теперь включает lyrics)
  */
 app.get("/api/tracks", (req, res) => {
   db.all(
@@ -122,6 +122,7 @@ app.get("/api/tracks", (req, res) => {
       title,
       filename,
       cover_filename,
+      lyrics,
       '/uploads/' || filename AS file_url,
       CASE
         WHEN cover_filename IS NOT NULL THEN '/uploads/' || cover_filename
@@ -145,9 +146,10 @@ app.get("/api/tracks", (req, res) => {
  * POST /api/tracks
  * Загрузка нового трека (только админ)
  * Принимает:
- *  - form-data: file (аудио, ОБЯЗАТЕЛЬНО)
- *  - form-data: cover (картинка, НЕ обязательно)
- *  - form-data: title (название, можно пустым)
+ *  - form-data: file (аудио) – ОБЯЗАТЕЛЬНО
+ *  - form-data: cover (картинка) – НЕобязательно
+ *  - form-data: title (название) – можно пустым
+ *  - form-data: lyrics (текст песни) – можно пустым
  */
 app.post("/api/tracks", authMiddleware, adminOnly, (req, res) => {
   if (!req.files || !req.files.file) {
@@ -156,6 +158,8 @@ app.post("/api/tracks", authMiddleware, adminOnly, (req, res) => {
 
   const audioFile = req.files.file;
   const title = req.body.title || audioFile.name;
+  const lyricsText = (req.body.lyrics || "").trim();
+  const lyrics = lyricsText.length > 0 ? lyricsText : null;
 
   const audioExt = path.extname(audioFile.name);
   const audioName = `track_${Date.now()}${audioExt}`;
@@ -167,10 +171,10 @@ app.post("/api/tracks", authMiddleware, adminOnly, (req, res) => {
   const insertRow = () => {
     db.run(
       `
-      INSERT INTO tracks (title, filename, cover_filename)
-      VALUES (?, ?, ?)
+      INSERT INTO tracks (title, filename, cover_filename, lyrics)
+      VALUES (?, ?, ?, ?)
     `,
-      [title, audioName, coverName],
+      [title, audioName, coverName, lyrics],
       function (err) {
         if (err) {
           console.error("Ошибка вставки трека:", err);
@@ -183,6 +187,7 @@ app.post("/api/tracks", authMiddleware, adminOnly, (req, res) => {
           title,
           file_url: `/uploads/${audioName}`,
           cover_url: coverName ? `/uploads/${coverName}` : null,
+          lyrics,
         });
       }
     );
