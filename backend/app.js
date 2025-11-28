@@ -1,209 +1,227 @@
-const express = require('express');
-const cors = require('cors');
-const fileUpload = require('express-fileupload');
-const bcrypt = require('bcrypt');
-const path = require('path');
-const fs = require('fs');
-const db = require('./db');
-const { createToken, requireAuth, requireAdmin } = require('./auth');
+const express = require("express");
+const cors = require("cors");
+const fileUpload = require("express-fileupload");
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+const path = require("path");
+const fs = require("fs");
+const db = require("./db"); // наш db.js
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const JWT_SECRET = process.env.JWT_SECRET || "music_portfolio_secret";
 
 // Мидлвары
 app.use(cors());
 app.use(express.json());
-app.use(fileUpload());
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use(
+  fileUpload({
+    createParentPath: true,
+  })
+);
 
-// --- АУТЕНТИФИКАЦИЯ: регистрация/логин ---
-app.post('/api/register', (req, res) => {
-  const { username, password } = req.body;
-  if (!password || !username) return res.status(400).json({ message: "Нет логина/пароля" });
-  db.get("SELECT * FROM users WHERE username=?", [username], (err, user) => {
-    if (user) return res.status(400).json({ message: "Пользователь существует" });
-    bcrypt.hash(password, 10, (err, hash) => {
-      db.run("INSERT INTO users (username, password) VALUES (?, ?)", [username, hash], function (err) {
-        if (err) return res.status(500).json({ message: "Ошибка базы" });
-        db.get("SELECT * FROM users WHERE id=?", [this.lastID], (err, user) => {
-          const token = createToken(user);
-          res.json({ token, user: { id: user.id, username: user.username, is_admin: !!user.is_admin } });
-        });
+// Папка для загрузок
+const uploadsDir = path.join(__dirname, "uploads");
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Раздаём файлы из папки uploads по пути /uploads/...
+app.use("/uploads", express.static(uploadsDir));
+
+/**
+ * Мидлварь: проверка токена (авторизация)
+ */
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers["authorization"] || "";
+  const token = authHeader.startsWith("Bearer ")
+    ? authHeader.slice(7)
+    : null;
+
+  if (!token) {
+    return res.status(401).send("Требуется авторизация");
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, payload) => {
+    if (err) {
+      return res.status(401).send("Неверный токен");
+    }
+    req.user = payload; // { id, login, role }
+    next();
+  });
+}
+
+/**
+ * Мидлварь: только админ
+ */
+function adminOnly(req, res, next) {
+  if (!req.user || req.user.role !== "admin") {
+    return res.status(403).send("Доступ только для администратора");
+  }
+  next();
+}
+
+/**
+ * POST /api/login
+ * Вход пользователя (для нас важен админ)
+ */
+app.post("/api/login", (req, res) => {
+  const { login, username, password } = req.body;
+  const userLogin = login || username;
+
+  if (!userLogin || !password) {
+    return res.status(400).send("Нужны логин и пароль");
+  }
+
+  db.get(
+    `SELECT * FROM users WHERE login = ?`,
+    [userLogin],
+    (err, user) => {
+      if (err) {
+        console.error("Ошибка БД при логине:", err);
+        return res.status(500).send("Ошибка сервера");
+      }
+      if (!user) {
+        return res.status(401).send("Неверный логин или пароль");
+      }
+
+      bcrypt.compare(password, user.password_hash, (errCmp, same) => {
+        if (errCmp) {
+          console.error("Ошибка сравнения пароля:", errCmp);
+          return res.status(500).send("Ошибка сервера");
+        }
+        if (!same) {
+          return res.status(401).send("Неверный логин или пароль");
+        }
+
+        const token = jwt.sign(
+          {
+            id: user.id,
+            login: user.login,
+            role: user.role,
+          },
+          JWT_SECRET,
+          { expiresIn: "7d" }
+        );
+
+        res.json({ token });
       });
-    });
-  });
+    }
+  );
 });
 
-app.post('/api/login', (req, res) => {
-  const { username, password } = req.body;
-  db.get("SELECT * FROM users WHERE username=?", [username], (err, user) => {
-    if (!user) return res.status(400).json({ message: "Нет такого пользователя" });
-    bcrypt.compare(password, user.password, (err, same) => {
-      if (!same) return res.status(400).json({ message: "Неверный пароль" });
-      const token = createToken(user);
-      res.json({ token, user: { id: user.id, username: user.username, is_admin: !!user.is_admin } });
-    });
-  });
+/**
+ * GET /api/tracks
+ * Список треков
+ */
+app.get("/api/tracks", (req, res) => {
+  db.all(
+    `
+    SELECT
+      id,
+      title,
+      filename,
+      cover_filename,
+      '/uploads/' || filename AS file_url,
+      CASE
+        WHEN cover_filename IS NOT NULL THEN '/uploads/' || cover_filename
+        ELSE NULL
+      END AS cover_url
+    FROM tracks
+    ORDER BY created_at DESC
+  `,
+    [],
+    (err, rows) => {
+      if (err) {
+        console.error("Ошибка получения треков:", err);
+        return res.status(500).send("Ошибка сервера");
+      }
+      res.json(rows);
+    }
+  );
 });
 
-// --- АЛЬБОМЫ ---
-app.get('/api/albums', (req, res) => {
-  db.all("SELECT * FROM albums", (err, rows) => res.json(rows));
-});
+/**
+ * POST /api/tracks
+ * Загрузка нового трека (только админ)
+ * Принимает:
+ *  - form-data: file (аудио, ОБЯЗАТЕЛЬНО)
+ *  - form-data: cover (картинка, НЕ обязательно)
+ *  - form-data: title (название, можно пустым)
+ */
+app.post("/api/tracks", authMiddleware, adminOnly, (req, res) => {
+  if (!req.files || !req.files.file) {
+    return res.status(400).send("Не передан файл трека (file)");
+  }
 
-app.post('/api/albums', requireAuth, requireAdmin, (req, res) => {
-  const { title } = req.body;
-  db.run("INSERT INTO albums (title) VALUES (?)", [title], function (err) {
-    if (err) return res.status(500).send();
-    res.json({ id: this.lastID, title });
-  });
-});
+  const audioFile = req.files.file;
+  const title = req.body.title || audioFile.name;
 
-// --- ТРЕКИ ---
-app.get('/api/tracks', (req, res) => {
-  db.all(`SELECT t.*, a.title as album_title 
-           FROM tracks t LEFT JOIN albums a ON t.album_id=a.id
-           ORDER BY t.created_at DESC`, (err, rows) => res.json(rows));
-});
+  const audioExt = path.extname(audioFile.name);
+  const audioName = `track_${Date.now()}${audioExt}`;
+  const audioPath = path.join(uploadsDir, audioName);
 
-// Загрузка трека (только админ)
-app.post('/api/tracks', requireAuth, requireAdmin, (req, res) => {
-  if (!req.files || !req.files.file) return res.status(400).send('Нет файла');
-  const track = req.files.file;
-  const allowed = ['audio/mpeg', 'audio/wav', 'audio/flac'];
-  if (!allowed.includes(track.mimetype)) return res.status(400).send('Недопустимый тип файла');
+  let coverName = null;
 
-  const audioName = Date.now() + '_' + track.name.replace(/\s/g, '_');
-  const audioPath = path.join(__dirname, 'uploads', audioName);
-
-  track.mv(audioPath, (err) => {
-    if (err) return res.status(500).send('Ошибка загрузки');
+  // Функция для записи в БД
+  const insertRow = () => {
     db.run(
-      "INSERT INTO tracks (title, filename, uploaded_by, album_id) VALUES (?, ?, ?, ?)",
-      [req.body.title || track.name, audioName, req.user.id, req.body.album_id || null],
+      `
+      INSERT INTO tracks (title, filename, cover_filename)
+      VALUES (?, ?, ?)
+    `,
+      [title, audioName, coverName],
       function (err) {
-        if (err) return res.status(500).send('Ошибка базы');
-        res.json({ id: this.lastID, filename: audioName });
+        if (err) {
+          console.error("Ошибка вставки трека:", err);
+          return res.status(500).send("Ошибка сохранения в БД");
+        }
+
+        const id = this.lastID;
+        res.json({
+          id,
+          title,
+          file_url: `/uploads/${audioName}`,
+          cover_url: coverName ? `/uploads/${coverName}` : null,
+        });
       }
     );
-  });
-});
+  };
 
-// --- Загрузка обложки для трека (админ) ---
-app.post('/api/tracks/:id/cover', requireAuth, requireAdmin, (req, res) => {
-  if (!req.files || !req.files.cover) return res.status(400).send('Нет файла');
-  const cover = req.files.cover;
-  const allowed = ['image/jpeg', 'image/png', 'image/webp'];
-  if (!allowed.includes(cover.mimetype)) return res.status(400).send('Только jpg/png/webp');
-
-  const coverName = Date.now() + '_' + cover.name.replace(/\s/g, '_');
-  const coverPath = path.join(__dirname, 'uploads', coverName);
-
-  cover.mv(coverPath, (err) => {
-    if (err) return res.status(500).send('Ошибка загрузки');
-    db.run("UPDATE tracks SET cover=? WHERE id=?", [coverName, req.params.id], function (err) {
-      if (err) return res.status(500).send('Ошибка базы');
-      res.json({ cover: coverName });
-    });
-  });
-});
-
-// --- Скачать трек ---
-app.get('/api/tracks/:id/download', (req, res) => {
-  db.get("SELECT filename FROM tracks WHERE id=?", [req.params.id], (err, row) => {
-    if (!row) return res.status(404).send('Трек не найден');
-    const filePath = path.join(__dirname, 'uploads', row.filename);
-    res.download(filePath);
-  });
-});
-
-// --- ПЛЕЙЛИСТЫ (user playlists) ---
-app.get('/api/playlists', requireAuth, (req, res) => {
-  db.all("SELECT * FROM playlists WHERE user_id=?", [req.user.id], (err, rows) => res.json(rows));
-});
-
-app.post('/api/playlists', requireAuth, (req, res) => {
-  db.run(
-    "INSERT INTO playlists (user_id, title) VALUES (?, ?)",
-    [req.user.id, req.body.title],
-    function (err) {
-      if (err) return res.status(500).json({ message: "Ошибка базы" });
-      res.json({ id: this.lastID, title: req.body.title });
+  // Сохраняем аудиофайл
+  audioFile.mv(audioPath, (errMove) => {
+    if (errMove) {
+      console.error("Ошибка сохранения трека:", errMove);
+      return res.status(500).send("Ошибка загрузки трека");
     }
-  );
-});
 
-app.post('/api/playlists/:id/tracks', requireAuth, (req, res) => {
-  db.run(
-    "INSERT INTO playlist_tracks (playlist_id, track_id) VALUES (?, ?)",
-    [req.params.id, req.body.track_id],
-    function (err) {
-      if (err) return res.status(500).json({ message: "Ошибка базы" });
-      res.json({ success: true });
+    // Если есть обложка, сохраняем её
+    if (req.files && req.files.cover) {
+      const coverFile = req.files.cover;
+      const coverExt = path.extname(coverFile.name);
+      coverName = `cover_${Date.now()}${coverExt}`;
+      const coverPath = path.join(uploadsDir, coverName);
+
+      coverFile.mv(coverPath, (errCover) => {
+        if (errCover) {
+          console.error("Ошибка сохранения обложки:", errCover);
+          return res.status(500).send("Ошибка загрузки обложки");
+        }
+        insertRow();
+      });
+    } else {
+      // Обложки нет — просто пишем трек в БД
+      insertRow();
     }
-  );
-});
-
-app.get('/api/playlists/:id', requireAuth, (req, res) => {
-  db.all(
-    `SELECT t.* FROM tracks t
-     JOIN playlist_tracks pt ON pt.track_id = t.id
-     WHERE pt.playlist_id=?`,
-    [req.params.id],
-    (err, tracks) => res.json(tracks)
-  );
-});
-
-// --- КОММЕНТАРИИ и ЛАЙКИ ---
-app.get('/api/tracks/:id/comments', (req, res) => {
-  db.all(
-    `SELECT c.*, u.username
-     FROM comments c JOIN users u ON u.id = c.user_id
-     WHERE c.track_id=?
-     ORDER BY c.posted_at DESC`,
-    [req.params.id],
-    (err, rows) => res.json(rows)
-  );
-});
-
-app.post('/api/tracks/:id/comments', requireAuth, (req, res) => {
-  db.run(
-    `INSERT INTO comments (user_id, track_id, text) VALUES (?, ?, ?)`,
-    [req.user.id, req.params.id, req.body.text],
-    function (err) {
-      if (err) return res.status(500).send('Ошибка');
-      res.json({ id: this.lastID, text: req.body.text });
-    });
-});
-
-app.post('/api/tracks/:id/like', requireAuth, (req, res) => {
-  db.run(
-    `INSERT OR IGNORE INTO likes (user_id, track_id) VALUES (?, ?)`,
-    [req.user.id, req.params.id],
-    function (err) {
-      if (err) return res.status(500).send('Ошибка базы');
-      res.json({ liked: true });
-    });
-});
-
-app.delete('/api/tracks/:id/like', requireAuth, (req, res) => {
-  db.run(
-    `DELETE FROM likes WHERE user_id=? AND track_id=?`,
-    [req.user.id, req.params.id],
-    function (err) {
-      if (err) return res.status(500).send('Ошибка базы');
-      res.json({ liked: false });
-    });
-});
-
-// Количество лайков по треку:
-app.get('/api/tracks/:id/likes', (req, res) => {
-  db.get(`SELECT COUNT(*) as cnt FROM likes WHERE track_id=?`, [req.params.id], (err, row) => {
-    res.json({ likes: row.cnt });
   });
 });
 
+// Простой корневой маршрут для проверки
+app.get("/", (req, res) => {
+  res.send("Backend работает");
+});
+
+// Запуск сервера
 app.listen(PORT, () => {
-  if (!fs.existsSync(path.join(__dirname, 'uploads'))) fs.mkdirSync(path.join(__dirname, 'uploads'));
   console.log(`Сервер запущен на http://localhost:${PORT}`);
 });
