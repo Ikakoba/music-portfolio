@@ -30,7 +30,7 @@ if (!fs.existsSync(uploadsDir)) {
 app.use("/uploads", express.static(uploadsDir));
 
 /**
- * Мидлварь: проверка токена (авторизация)
+ * Мидлваль: проверка токена (авторизация)
  */
 function authMiddleware(req, res, next) {
   const authHeader = req.headers["authorization"] || "";
@@ -112,7 +112,7 @@ app.post("/api/login", (req, res) => {
 
 /**
  * GET /api/tracks
- * Список треков (теперь включает lyrics)
+ * Список треков (включая lyrics)
  */
 app.get("/api/tracks", (req, res) => {
   db.all(
@@ -129,7 +129,7 @@ app.get("/api/tracks", (req, res) => {
         ELSE NULL
       END AS cover_url
     FROM tracks
-    ORDER BY created_at DESC
+    ORDER BY created_at DESC, id DESC
   `,
     [],
     (err, rows) => {
@@ -219,6 +219,72 @@ app.post("/api/tracks", authMiddleware, adminOnly, (req, res) => {
       insertRow();
     }
   });
+});
+
+/**
+ * DELETE /api/tracks/:id
+ * Удаление трека (только админ) вместе с файлами
+ */
+app.delete("/api/tracks/:id", authMiddleware, adminOnly, (req, res) => {
+  const trackId = req.params.id;
+
+  db.get(
+    `SELECT filename, cover_filename FROM tracks WHERE id = ?`,
+    [trackId],
+    (err, row) => {
+      if (err) {
+        console.error("Ошибка поиска трека для удаления:", err);
+        return res.status(500).send("Ошибка сервера");
+      }
+      if (!row) {
+        return res.status(404).send("Трек не найден");
+      }
+
+      const audioPath =
+        row.filename && path.join(uploadsDir, row.filename);
+      const coverPath =
+        row.cover_filename &&
+        path.join(uploadsDir, row.cover_filename);
+
+      // удаляем аудио
+      const deleteAudio = (cb) => {
+        if (!audioPath) return cb();
+        fs.unlink(audioPath, (errUnlink) => {
+          if (errUnlink && errUnlink.code !== "ENOENT") {
+            console.error("Ошибка удаления аудиофайла:", errUnlink);
+          }
+          cb();
+        });
+      };
+
+      // удаляем обложку
+      const deleteCover = (cb) => {
+        if (!coverPath) return cb();
+        fs.unlink(coverPath, (errUnlink) => {
+          if (errUnlink && errUnlink.code !== "ENOENT") {
+            console.error("Ошибка удаления обложки:", errUnlink);
+          }
+          cb();
+        });
+      };
+
+      deleteAudio(() => {
+        deleteCover(() => {
+          db.run(
+            `DELETE FROM tracks WHERE id = ?`,
+            [trackId],
+            (errDel) => {
+              if (errDel) {
+                console.error("Ошибка удаления трека из БД:", errDel);
+                return res.status(500).send("Ошибка сервера");
+              }
+              return res.json({ success: true });
+            }
+          );
+        });
+      });
+    }
+  );
 });
 
 // Простой корневой маршрут для проверки
