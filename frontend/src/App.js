@@ -102,10 +102,10 @@ function App() {
   const [loginError, setLoginError] = useState("");
   const [loginDialogOpen, setLoginDialogOpen] = useState(false);
 
-  // форма загрузки
+  // форма загрузки - ИСПРАВЛЕНА ДЛЯ GOOGLE DRIVE
   const [title, setTitle] = useState("");
-  const [audioFile, setAudioFile] = useState(null);
-  const [coverFile, setCoverFile] = useState(null);
+  const [googleDriveAudioId, setGoogleDriveAudioId] = useState("");
+  const [googleDriveCoverId, setGoogleDriveCoverId] = useState("");
   const [lyrics, setLyrics] = useState("");
   const [uploadStatus, setUploadStatus] = useState("");
 
@@ -184,6 +184,7 @@ function App() {
     setUploadStatus("");
   }
 
+  // ИСПРАВЛЕННАЯ ФУНКЦИЯ ДЛЯ GOOGLE DRIVE
   async function handleUpload(e) {
     e.preventDefault();
     setUploadStatus("");
@@ -191,22 +192,27 @@ function App() {
       setUploadStatus("ჯერ შედით როგორც ადმინისტრატორი.");
       return;
     }
-    if (!audioFile) {
-      setUploadStatus("აირჩიეთ აუდიოფაილი.");
+    if (!googleDriveAudioId) {
+      setUploadStatus("შეიყვანეთ Google Drive Audio ID.");
       return;
     }
     try {
-      const formData = new FormData();
-      formData.append("title", title || audioFile.name);
-      formData.append("file", audioFile);
-      if (coverFile) formData.append("cover", coverFile);
-      formData.append("lyrics", lyrics);
+      const trackData = {
+        title: title || "უსახელო ტრეკი",
+        google_drive_audio_id: googleDriveAudioId,
+        google_drive_cover_id: googleDriveCoverId || null,
+        lyrics: lyrics || ""
+      };
 
       const res = await fetch(`${API_URL}/api/tracks`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(trackData),
       });
+      
       if (!res.ok) {
         const text = await res.text();
         throw new Error(text || `ატვირთვის შეცდომა: ${res.status}`);
@@ -214,8 +220,8 @@ function App() {
 
       setUploadStatus("ტრეკი წარმატებით აიტვირთა.");
       setTitle("");
-      setAudioFile(null);
-      setCoverFile(null);
+      setGoogleDriveAudioId("");
+      setGoogleDriveCoverId("");
       setLyrics("");
       loadTracks(sharedTrackId || null);
     } catch (err) {
@@ -344,7 +350,7 @@ function App() {
             </Box>
           )}
 
-          {/* форма загрузки — только для админа */}
+          {/* форма загрузки — только для админа - ИСПРАВЛЕНА ДЛЯ GOOGLE DRIVE */}
           {token && (
             <Box
               component="form"
@@ -374,29 +380,21 @@ function App() {
                   onChange={(e) => setTitle(e.target.value)}
                 />
 
-                <Button variant="contained" component="label">
-                  აირჩიეთ აუდიოფაილი (mp3 / wav / flac)
-                  <input
-                    type="file"
-                    accept="audio/*"
-                    hidden
-                    onChange={(e) =>
-                      setAudioFile(e.target.files?.[0] || null)
-                    }
-                  />
-                </Button>
+                {/* ЗАМЕНЕНО НА ПОЛЯ ДЛЯ GOOGLE DRIVE ID */}
+                <TextField
+                  label="Google Drive Audio ID"
+                  value={googleDriveAudioId}
+                  onChange={(e) => setGoogleDriveAudioId(e.target.value)}
+                  helperText="ID აუდიო ფაილის Google Drive-იდან"
+                  required
+                />
 
-                <Button variant="outlined" component="label">
-                  აირჩიეთ ქავერი (არასავალდებულოა)
-                  <input
-                    type="file"
-                    accept="image/*"
-                    hidden
-                    onChange={(e) =>
-                      setCoverFile(e.target.files?.[0] || null)
-                    }
-                  />
-                </Button>
+                <TextField
+                  label="Google Drive Cover ID (არასავალდებულოა)"
+                  value={googleDriveCoverId}
+                  onChange={(e) => setGoogleDriveCoverId(e.target.value)}
+                  helperText="ID სურათის Google Drive-იდან"
+                />
 
                 <TextField
                   label="სიმღერის ტექსტი (არასავალდებულოა)"

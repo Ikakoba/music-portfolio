@@ -19,28 +19,38 @@ db.serialize(() => {
   `
   );
 
-  // Таблица треков (если создаётся с нуля — сразу с колонкой lyrics)
+  // Таблица треков с поддержкой Google Drive
   db.run(
     `
     CREATE TABLE IF NOT EXISTS tracks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       title TEXT,
-      filename TEXT NOT NULL,
+      filename TEXT,
       cover_filename TEXT,
       lyrics TEXT,
+      google_drive_audio_id TEXT,
+      google_drive_cover_id TEXT,
+      file_url TEXT,
+      cover_url TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `
   );
 
-  // Если таблица уже существовала без lyrics — попробуем добавить колонку
-  db.run(`ALTER TABLE tracks ADD COLUMN lyrics TEXT`, (err) => {
-    if (err) {
-      // Если ошибка "duplicate column name" — значит колонка уже есть, это нормально
-      if (!String(err.message).includes("duplicate column name")) {
-        console.error("Ошибка добавления колонки lyrics:", err);
+  // Добавляем новые колонки если их нет (для обратной совместимости)
+  const newColumns = [
+    'google_drive_audio_id',
+    'google_drive_cover_id', 
+    'file_url',
+    'cover_url'
+  ];
+
+  newColumns.forEach(column => {
+    db.run(`ALTER TABLE tracks ADD COLUMN ${column} TEXT`, (err) => {
+      if (err && !String(err.message).includes("duplicate column name")) {
+        console.error(`Ошибка добавления колонки ${column}:`, err);
       }
-    }
+    });
   });
 
   // Проверяем, есть ли админ

@@ -1,10 +1,7 @@
 const express = require("express");
 const cors = require("cors");
-const fileUpload = require("express-fileupload");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
-const path = require("path");
-const fs = require("fs");
 const db = require("./db");
 
 const app = express();
@@ -14,20 +11,6 @@ const JWT_SECRET = process.env.JWT_SECRET || "music_portfolio_secret";
 // Мидлвары
 app.use(cors());
 app.use(express.json());
-app.use(
-  fileUpload({
-    createParentPath: true,
-  })
-);
-
-// Папка для загрузок
-const uploadsDir = path.join(__dirname, "uploads");
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-// Раздаём файлы из папки uploads по пути /uploads/...
-app.use("/uploads", express.static(uploadsDir));
 
 /**
  * Мидлваль: проверка токена (авторизация)
@@ -120,12 +103,17 @@ app.get("/api/tracks", (req, res) => {
     SELECT
       id,
       title,
-      filename,
-      cover_filename,
+      google_drive_audio_id,
+      google_drive_cover_id,
       lyrics,
-      '/uploads/' || filename AS file_url,
       CASE
-        WHEN cover_filename IS NOT NULL THEN '/uploads/' || cover_filename
+        WHEN google_drive_audio_id IS NOT NULL 
+        THEN 'https://drive.google.com/uc?export=download&id=' || google_drive_audio_id
+        ELSE NULL
+      END AS file_url,
+      CASE
+        WHEN google_drive_cover_id IS NOT NULL 
+        THEN 'https://drive.google.com/uc?export=view&id=' || google_drive_cover_id
         ELSE NULL
       END AS cover_url
     FROM tracks
@@ -145,151 +133,81 @@ app.get("/api/tracks", (req, res) => {
 /**
  * POST /api/tracks
  * Загрузка нового трека (только админ)
- * Принимает:
- *  - form-data: file (аудио) – ОБЯЗАТЕЛЬНО
- *  - form-data: cover (картинка) – НЕобязательно
- *  - form-data: title (название) – можно пустым
- *  - form-data: lyrics (текст песни) – можно пустым
+ * Принимает JSON:
+ *  - title (название) - можно пустым
+ *  - google_drive_audio_id (ID аудио файла) - ОБЯЗАТЕЛЬНО
+ *  - google_drive_cover_id (ID обложки) - НЕобязательно
+ *  - lyrics (текст песни) - можно пустым
  */
 app.post("/api/tracks", authMiddleware, adminOnly, (req, res) => {
-  if (!req.files || !req.files.file) {
-    return res.status(400).send("Не передан файл трека (file)");
+  const { title, google_drive_audio_id, google_drive_cover_id, lyrics } = req.body;
+
+  if (!google_drive_audio_id) {
+    return res.status(400).send("Не передан google_drive_audio_id");
   }
 
-  const audioFile = req.files.file;
-  const title = req.body.title || audioFile.name;
-  const lyricsText = (req.body.lyrics || "").trim();
-  const lyrics = lyricsText.length > 0 ? lyricsText : null;
+  const trackTitle = title || "Без названия";
+  const lyricsText = (lyrics || "").trim();
+  const finalLyrics = lyricsText.length > 0 ? lyricsText : null;
 
-  const audioExt = path.extname(audioFile.name);
-  const audioName = `track_${Date.now()}${audioExt}`;
-  const audioPath = path.join(uploadsDir, audioName);
+  // Создаем ссылки на Google Drive
+  const file_url = `https://drive.google.com/uc?export=download&id=${google_drive_audio_id}`;
+  const cover_url = google_drive_cover_id 
+    ? `https://drive.google.com/uc?export=view&id=${google_drive_cover_id}`
+    : null;
 
-  let coverName = null;
-
-  // Функция для записи в БД
-  const insertRow = () => {
-    db.run(
-      `
-      INSERT INTO tracks (title, filename, cover_filename, lyrics)
-      VALUES (?, ?, ?, ?)
-    `,
-      [title, audioName, coverName, lyrics],
-      function (err) {
-        if (err) {
-          console.error("Ошибка вставки трека:", err);
-          return res.status(500).send("Ошибка сохранения в БД");
-        }
-
-        const id = this.lastID;
-        res.json({
-          id,
-          title,
-          file_url: `/uploads/${audioName}`,
-          cover_url: coverName ? `/uploads/${coverName}` : null,
-          lyrics,
-        });
+  db.run(
+    `
+    INSERT INTO tracks (title, google_drive_audio_id, google_drive_cover_id, lyrics, file_url, cover_url)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `,
+    [trackTitle, google_drive_audio_id, google_drive_cover_id, finalLyrics, file_url, cover_url],
+    function (err) {
+      if (err) {
+        console.error("Ошибка вставки трека:", err);
+        return res.status(500).send("Ошибка сохранения в БД");
       }
-    );
-  };
 
-  // Сохраняем аудиофайл
-  audioFile.mv(audioPath, (errMove) => {
-    if (errMove) {
-      console.error("Ошибка сохранения трека:", errMove);
-      return res.status(500).send("Ошибка загрузки трека");
-    }
-
-    // Если есть обложка, сохраняем её
-    if (req.files && req.files.cover) {
-      const coverFile = req.files.cover;
-      const coverExt = path.extname(coverFile.name);
-      coverName = `cover_${Date.now()}${coverExt}`;
-      const coverPath = path.join(uploadsDir, coverName);
-
-      coverFile.mv(coverPath, (errCover) => {
-        if (errCover) {
-          console.error("Ошибка сохранения обложки:", errCover);
-          return res.status(500).send("Ошибка загрузки обложки");
-        }
-        insertRow();
+      const id = this.lastID;
+      res.json({
+        id,
+        title: trackTitle,
+        file_url,
+        cover_url,
+        lyrics: finalLyrics,
+        google_drive_audio_id,
+        google_drive_cover_id
       });
-    } else {
-      // Обложки нет — просто пишем трек в БД
-      insertRow();
     }
-  });
+  );
 });
 
 /**
  * DELETE /api/tracks/:id
- * Удаление трека (только админ) вместе с файлами
+ * Удаление трека (только админ) - только из базы данных
  */
 app.delete("/api/tracks/:id", authMiddleware, adminOnly, (req, res) => {
   const trackId = req.params.id;
 
-  db.get(
-    `SELECT filename, cover_filename FROM tracks WHERE id = ?`,
+  db.run(
+    `DELETE FROM tracks WHERE id = ?`,
     [trackId],
-    (err, row) => {
+    function (err) {
       if (err) {
-        console.error("Ошибка поиска трека для удаления:", err);
+        console.error("Ошибка удаления трека из БД:", err);
         return res.status(500).send("Ошибка сервера");
       }
-      if (!row) {
+      if (this.changes === 0) {
         return res.status(404).send("Трек не найден");
       }
-
-      const audioPath =
-        row.filename && path.join(uploadsDir, row.filename);
-      const coverPath =
-        row.cover_filename &&
-        path.join(uploadsDir, row.cover_filename);
-
-      // удаляем аудио
-      const deleteAudio = (cb) => {
-        if (!audioPath) return cb();
-        fs.unlink(audioPath, (errUnlink) => {
-          if (errUnlink && errUnlink.code !== "ENOENT") {
-            console.error("Ошибка удаления аудиофайла:", errUnlink);
-          }
-          cb();
-        });
-      };
-
-      // удаляем обложку
-      const deleteCover = (cb) => {
-        if (!coverPath) return cb();
-        fs.unlink(coverPath, (errUnlink) => {
-          if (errUnlink && errUnlink.code !== "ENOENT") {
-            console.error("Ошибка удаления обложки:", errUnlink);
-          }
-          cb();
-        });
-      };
-
-      deleteAudio(() => {
-        deleteCover(() => {
-          db.run(
-            `DELETE FROM tracks WHERE id = ?`,
-            [trackId],
-            (errDel) => {
-              if (errDel) {
-                console.error("Ошибка удаления трека из БД:", errDel);
-                return res.status(500).send("Ошибка сервера");
-              }
-              return res.json({ success: true });
-            }
-          );
-        });
-      });
+      res.json({ success: true });
     }
   );
 });
 
 // Простой корневой маршрут для проверки
 app.get("/", (req, res) => {
-  res.send("Backend работает");
+  res.send("Backend работает с Google Drive");
 });
 
 // Запуск сервера
